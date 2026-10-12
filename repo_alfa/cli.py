@@ -10,18 +10,28 @@ from rich.table import Table
 
 from .engine import RepoAlfaEngine
 from .models import ScanConfig
+from .validator import validate_capture
+from .visual_diff import compare_images
 
 app = typer.Typer(help="REPO ALFA - Advanced Web Reverse Engineering Framework")
 console = Console()
 
 
-def _execute(target: str, mode: str, output: Path, depth: int, browser: bool = True):
+def _execute(
+    target: str,
+    mode: str,
+    output: Path,
+    depth: int,
+    browser: bool = True,
+    plugins: list[str] | None = None,
+):
     config = ScanConfig(
         target=target,
         mode=mode,
         output_root=output,
         max_depth=depth,
         browser=browser,
+        plugins=plugins or [],
     )
     return asyncio.run(RepoAlfaEngine(config).run())
 
@@ -45,10 +55,22 @@ def _print_summary(report) -> None:
     )
     console.print(f"[bold]Routes:[/bold] {len(report.routes)}")
     console.print(f"[bold]Observed endpoints:[/bold] {len(report.observed_endpoints)}")
+    if report.framework_matches:
+        names = [f"{item.get('name')} ({item.get('confidence')})" for item in report.framework_matches]
+        console.print(f"[bold]Frameworks:[/bold] {', '.join(names)}")
+    if report.coverage:
+        console.print(f"[bold]Coverage:[/bold] {report.coverage.get('score', 0)}%")
 
 
-def _run(target: str, mode: str, output: Path, depth: int, browser: bool = True) -> None:
-    report = _execute(target, mode, output, depth, browser)
+def _run(
+    target: str,
+    mode: str,
+    output: Path,
+    depth: int,
+    browser: bool = True,
+    plugins: list[str] | None = None,
+) -> None:
+    report = _execute(target, mode, output, depth, browser, plugins)
     _print_summary(report)
 
 
@@ -91,7 +113,12 @@ def endpoints(target: str, output: Path = Path("output"), depth: int = 3) -> Non
 @app.command()
 def technologies(target: str, output: Path = Path("output"), depth: int = 1) -> None:
     report = _execute(target, "standard", output, depth)
-    console.print_json(data={"technologies": report.technologies})
+    console.print_json(
+        data={
+            "technologies": report.technologies,
+            "frameworks": report.framework_matches,
+        }
+    )
 
 
 @app.command()
@@ -100,13 +127,23 @@ def deep(target: str, output: Path = Path("output"), depth: int = 5) -> None:
 
 
 @app.command()
-def forensic(target: str, output: Path = Path("output"), depth: int = 10) -> None:
-    _run(target, "forensic", output, depth)
+def forensic(
+    target: str,
+    output: Path = Path("output"),
+    depth: int = 10,
+    plugin: list[str] | None = typer.Option(None, "--plugin", help="module:attribute plugin"),
+) -> None:
+    _run(target, "forensic", output, depth, plugins=plugin)
 
 
 @app.command()
-def exhaustive(target: str, output: Path = Path("output"), depth: int = 15) -> None:
-    _run(target, "exhaustive", output, depth)
+def exhaustive(
+    target: str,
+    output: Path = Path("output"),
+    depth: int = 15,
+    plugin: list[str] | None = typer.Option(None, "--plugin", help="module:attribute plugin"),
+) -> None:
+    _run(target, "exhaustive", output, depth, plugins=plugin)
 
 
 @app.command()
@@ -116,15 +153,21 @@ def reconstruct(target: str, output: Path = Path("output"), depth: int = 8) -> N
 
 @app.command()
 def validate(path: Path) -> None:
-    report = path / "full-report.json" if path.is_dir() else path
-    if not report.exists():
-        raise typer.BadParameter(f"report not found: {report}")
-    data = json.loads(report.read_text(encoding="utf-8"))
-    console.print("[green]Report is readable.[/green]")
-    console.print(f"Target: {data.get('target')}")
-    console.print(f"Modules: {len(data.get('modules', []))}")
-    console.print(f"Routes: {len(data.get('routes', []))}")
-    console.print(f"Observed endpoints: {len(data.get('observed_endpoints', []))}")
+    root = path.parent if path.is_file() else path
+    result = validate_capture(root)
+    console.print_json(data=result.to_dict())
+    if not result.ok:
+        raise typer.Exit(code=2)
+
+
+@app.command("visual-diff")
+def visual_diff(
+    left: Path,
+    right: Path,
+    output: Path = Path("visual-diff.png"),
+) -> None:
+    result = compare_images(left, right, output)
+    console.print_json(data=result.to_dict())
 
 
 @app.command()
