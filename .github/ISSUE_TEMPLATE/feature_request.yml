@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose an analyzer, capture layer or reliability improvement
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What observable web-analysis problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe inputs, outputs, fallbacks and evidence artifacts.
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Test strategy
+      description: How can the feature be tested reproducibly without relying on a third-party private target?
