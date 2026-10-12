@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import typer
@@ -43,8 +42,9 @@ def _print_summary(report) -> None:
     table.add_column("Recovered")
     table.add_column("Errors")
     for module in report.modules:
+        resumed = " (resume)" if module.data.get("_resumed_from_checkpoint") else ""
         table.add_row(
-            module.name,
+            module.name + resumed,
             module.status,
             str(module.recovered_failures),
             str(len(module.errors)),
@@ -172,15 +172,14 @@ def visual_diff(
 
 @app.command()
 def resume(path: Path) -> None:
-    checkpoint_dir = path / "checkpoints"
-    if not checkpoint_dir.exists():
-        raise typer.BadParameter("checkpoint directory not found")
-    checkpoints = sorted(checkpoint_dir.glob("*.json"))
-    console.print(f"Found {len(checkpoints)} checkpoint(s).")
-    for item in checkpoints:
-        data = json.loads(item.read_text(encoding="utf-8"))
-        status = "complete" if data.get("completed") else "incomplete"
-        console.print(f" - {item.name}: {status}")
+    root = path.parent if path.is_file() else path
+    config_path = root / "scan-config.json"
+    if not config_path.exists():
+        raise typer.BadParameter("scan-config.json not found in capture directory")
+    config = ScanConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
+    config.output_root = root.parent
+    report = asyncio.run(RepoAlfaEngine(config, resume=True).run())
+    _print_summary(report)
 
 
 if __name__ == "__main__":
