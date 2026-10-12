@@ -56,7 +56,9 @@ class ReconstructionEngine:
                     raw = match.group("url")
                     absolute = urljoin(base_url, raw)
                     local = mapping.get(absolute)
-                    return f"url('{local.replace('\\', '/') if local else raw}')"
+                    chosen = local if local else raw
+                    chosen = chosen.replace(chr(92), "/")
+                    return "url('" + chosen + "')"
                 node["style"] = CSS_URL_RE.sub(replace, style)
 
         return str(soup)
