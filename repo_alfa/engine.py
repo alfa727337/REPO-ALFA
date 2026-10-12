@@ -12,6 +12,9 @@ from .browser_capture import BrowserCapture
 from .checkpoints import Checkpoint, CheckpointStore
 from .coverage import build_coverage, write_coverage
 from .crawler import Crawler
+from .css_analysis import analyze_directory as analyze_css_directory
+from .discovery import PublicDiscovery
+from .dom_analysis import analyze_capture as analyze_dom_capture
 from .frameworks import analyze_frameworks
 from .graphql_capture import detect_graphql, write_report as write_graphql_report
 from .graphing import build_endpoint_graph, build_route_graph, export_graph
@@ -20,8 +23,11 @@ from .html_report import render_html_report
 from .javascript_analysis import aggregate as aggregate_js, analyze_directory
 from .models import ModuleResult, ScanConfig, ScanReport
 from .plugins import PluginContext, run_plugins
+from .pwa import PWAAnalyzer
 from .reconstruction import ReconstructionEngine
 from .recovery import RecoveryEngine
+from .security_audit import audit_cookies, audit_headers
+from .sourcemaps import SourceMapAnalyzer
 from .sqlite_index import build_index
 from .static_capture import StaticCapture
 
@@ -99,6 +105,14 @@ class RepoAlfaEngine:
                 ),
             )
 
+        discovery_result = None
+        if rank >= 1:
+            discovery = PublicDiscovery(timeout=self.config.timeout_seconds)
+            discovery_result = await self._module(
+                "public-discovery",
+                lambda: discovery.discover(target, self.output / "discovery"),
+            )
+
         crawl_result = None
         if rank >= 1 and self.config.max_depth > 0:
             crawler = Crawler(
@@ -111,23 +125,30 @@ class RepoAlfaEngine:
         routes: set[str] = set()
         texts: list[str] = []
         asset_urls: list[str] = []
+        manifest_url: str | None = None
         if static_result.status == "complete":
             routes.update(static_result.data.get("links", []))
             asset_urls.extend(static_result.data.get("assets", []))
+            manifest_url = static_result.data.get("manifest")
             source = self.output / "html" / "source.html"
             if source.exists():
                 texts.append(source.read_text(encoding="utf-8", errors="ignore"))
+
+        if discovery_result and discovery_result.status == "complete":
+            routes.update(discovery_result.data.get("urls", []))
 
         if crawl_result and crawl_result.status == "complete":
             routes.update(crawl_result.data.get("discovered", []))
 
         network_events: list[dict] = []
         network_urls: list[str] = []
+        service_workers: list[dict] = []
         if browser_result and browser_result.status == "complete":
             asset_urls.extend(browser_result.data.get("scripts", []))
             asset_urls.extend(browser_result.data.get("stylesheets", []))
             network_events = browser_result.data.get("network", [])
             network_urls = [item["url"] for item in network_events if item.get("url")]
+            service_workers = browser_result.data.get("service_workers", [])
             dom = self.output / "dom" / "rendered.html"
             if dom.exists():
                 texts.append(dom.read_text(encoding="utf-8", errors="ignore"))
@@ -191,6 +212,63 @@ class RepoAlfaEngine:
             )
             self.report.artifacts.append(str(js_path))
 
+            css_result = analyze_css_directory(self.output / "assets")
+            css_path = reports_dir / "css.json"
+            css_path.write_text(
+                json.dumps(css_result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.report.artifacts.append(str(css_path))
+
+            dom_result = analyze_dom_capture(self.output, target)
+            if dom_result is not None:
+                dom_path = reports_dir / "dom-diff.json"
+                dom_path.write_text(
+                    json.dumps(dom_result, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                self.report.artifacts.append(str(dom_path))
+
+            pwa = PWAAnalyzer(timeout=self.config.timeout_seconds)
+            await self._module(
+                "pwa-analysis",
+                lambda: pwa.analyze(manifest_url, service_workers, self.output / "pwa"),
+            )
+
+            cookies: list[dict] = []
+            storage_path = self.output / "storage" / "browser.json"
+            if storage_path.exists():
+                try:
+                    cookies = json.loads(storage_path.read_text(encoding="utf-8")).get("cookies", [])
+                except (ValueError, OSError):
+                    cookies = []
+            security = {
+                "headers": audit_headers(static_result.data.get("headers", {}) if static_result else {}),
+                "cookies": audit_cookies(cookies),
+            }
+            security_path = reports_dir / "security-audit.json"
+            security_path.write_text(
+                json.dumps(security, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.report.artifacts.append(str(security_path))
+
+        if rank >= 3 and browser_result and browser_result.status == "complete":
+            scripts = browser_result.data.get("scripts", [])[:100]
+            source_map_analyzer = SourceMapAnalyzer(timeout=self.config.timeout_seconds)
+            source_map_results = []
+            for script_url in scripts:
+                try:
+                    source_map_results.append(
+                        await source_map_analyzer.inspect(
+                            script_url, self.output / "sourcemaps"
+                        )
+                    )
+                except Exception as exc:
+                    source_map_results.append({"script": script_url, "error": repr(exc)})
+            source_map_path = reports_dir / "sourcemaps.json"
+            source_map_path.write_text(
+                json.dumps(source_map_results, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.report.artifacts.append(str(source_map_path))
+
         if self.config.mode in {"reconstruction", "exhaustive"}:
             reconstruction = ReconstructionEngine()
             reconstruction_result = await self._module(
@@ -231,7 +309,6 @@ class RepoAlfaEngine:
         html_path = render_html_report(report_dict, reports_dir / "report.html")
         self.report.artifacts.extend([str(coverage_path), str(sqlite_path), str(html_path)])
 
-        # Rewrite once so generated report artifacts and coverage are themselves recorded.
         report_path.write_text(self.report.model_dump_json(indent=2), encoding="utf-8")
         return self.report
 
