@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 from pathlib import Path
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ class AssetDownloader:
                             "url": url,
                             "status": "saved",
                             "path": str(path),
+                            "relative_path": str(path.relative_to(output.parent)),
                             "sha256": hashlib.sha256(body).hexdigest(),
                             "bytes": len(body),
                             "content_type": response.headers.get("content-type"),
@@ -40,6 +42,20 @@ class AssetDownloader:
                     )
                 except Exception as exc:
                     results.append({"url": url, "status": "failed", "error": repr(exc)})
+
+        manifest = {
+            item["url"]: item["relative_path"]
+            for item in results
+            if item.get("status") == "saved" and item.get("relative_path")
+        }
+        (output / "manifest.json").write_text(
+            json.dumps(
+                {"assets": results, "url_to_local": manifest},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         return results
 
     def _path_for(self, url: str, content_type: str | None, root: Path) -> Path:
@@ -49,4 +65,5 @@ class AssetDownloader:
             ext = mimetypes.guess_extension(content_type.split(";", 1)[0].strip()) or ""
             name += ext
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
-        return root / parsed.netloc / f"{digest}-{name}"
+        safe_host = parsed.netloc.replace(":", "_") or "unknown-host"
+        return root / safe_host / f"{digest}-{name}"
