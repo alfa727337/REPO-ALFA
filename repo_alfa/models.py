@@ -21,7 +21,10 @@ class ScanConfig(BaseModel):
     same_origin_only: bool = True
     screenshot: bool = True
     capture_console: bool = True
+    explore_ui_states: bool = True
+    max_ui_states: int = Field(default=30, ge=0, le=250)
     user_agent: str | None = None
+    storage_state: Path | None = None
     plugins: list[str] = Field(default_factory=list)
 
 
