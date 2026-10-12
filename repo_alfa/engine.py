@@ -42,17 +42,37 @@ MODE_RANK = {
 
 
 class RepoAlfaEngine:
-    def __init__(self, config: ScanConfig) -> None:
+    def __init__(self, config: ScanConfig, resume: bool = False) -> None:
         self.config = config
+        self.resume_existing = resume
         host = urlparse(str(config.target)).netloc.replace(":", "_")
         self.output = config.output_root / host
         self.output.mkdir(parents=True, exist_ok=True)
         self.checkpoints = CheckpointStore(self.output)
         self.recovery = RecoveryEngine(retries=config.retries)
         self.report = ScanReport(target=str(config.target), mode=config.mode)
+        (self.output / "scan-config.json").write_text(
+            config.model_dump_json(indent=2), encoding="utf-8"
+        )
 
     async def _module(self, name: str, fn):
         started = datetime.now(timezone.utc)
+        if self.resume_existing:
+            checkpoint = self.checkpoints.load(name)
+            if checkpoint and checkpoint.completed:
+                data = dict(checkpoint.payload)
+                data["_resumed_from_checkpoint"] = True
+                result = ModuleResult(
+                    name=name,
+                    status="complete",
+                    started_at=started,
+                    finished_at=datetime.now(timezone.utc),
+                    data=data,
+                    recovered_failures=0,
+                )
+                self.report.modules.append(result)
+                return result
+
         try:
             data = await self.recovery.run(name, fn)
             result = ModuleResult(
@@ -241,7 +261,7 @@ class RepoAlfaEngine:
                 except (ValueError, OSError):
                     cookies = []
             security = {
-                "headers": audit_headers(static_result.data.get("headers", {}) if static_result else {}),
+                "headers": audit_headers(static_result.data.get("headers", {})),
                 "cookies": audit_cookies(cookies),
             }
             security_path = reports_dir / "security-audit.json"
