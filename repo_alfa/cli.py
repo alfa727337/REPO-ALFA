@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .doctor import run_doctor
 from .engine import RepoAlfaEngine
 from .models import ScanConfig
 from .validator import validate_capture
@@ -56,7 +57,10 @@ def _print_summary(report) -> None:
     console.print(f"[bold]Routes:[/bold] {len(report.routes)}")
     console.print(f"[bold]Observed endpoints:[/bold] {len(report.observed_endpoints)}")
     if report.framework_matches:
-        names = [f"{item.get('name')} ({item.get('confidence')})" for item in report.framework_matches]
+        names = [
+            f"{item.get('name')} ({item.get('confidence')})"
+            for item in report.framework_matches
+        ]
         console.print(f"[bold]Frameworks:[/bold] {', '.join(names)}")
     if report.coverage:
         console.print(f"[bold]Coverage:[/bold] {report.coverage.get('score', 0)}%")
@@ -72,6 +76,15 @@ def _run(
 ) -> None:
     report = _execute(target, mode, output, depth, browser, plugins)
     _print_summary(report)
+
+
+@app.command()
+def doctor() -> None:
+    """Check the local runtime before starting a scan."""
+    result = run_doctor()
+    console.print_json(data=result)
+    if not result["ok"]:
+        raise typer.Exit(code=2)
 
 
 @app.command()
@@ -93,7 +106,11 @@ def map_site(target: str, output: Path = Path("output"), depth: int = 4) -> None
 @app.command()
 def assets(target: str, output: Path = Path("output"), depth: int = 3) -> None:
     report = _execute(target, "deep", output, depth)
-    asset_modules = [m.model_dump(mode="json") for m in report.modules if m.name == "asset-download"]
+    asset_modules = [
+        m.model_dump(mode="json")
+        for m in report.modules
+        if m.name == "asset-download"
+    ]
     console.print_json(data={"asset_modules": asset_modules})
 
 
@@ -131,7 +148,9 @@ def forensic(
     target: str,
     output: Path = Path("output"),
     depth: int = 10,
-    plugin: list[str] | None = typer.Option(None, "--plugin", help="module:attribute plugin"),
+    plugin: list[str] | None = typer.Option(
+        None, "--plugin", help="module:attribute plugin"
+    ),
 ) -> None:
     _run(target, "forensic", output, depth, plugins=plugin)
 
@@ -141,7 +160,9 @@ def exhaustive(
     target: str,
     output: Path = Path("output"),
     depth: int = 15,
-    plugin: list[str] | None = typer.Option(None, "--plugin", help="module:attribute plugin"),
+    plugin: list[str] | None = typer.Option(
+        None, "--plugin", help="module:attribute plugin"
+    ),
 ) -> None:
     _run(target, "exhaustive", output, depth, plugins=plugin)
 
