@@ -20,6 +20,9 @@ class ScanConfig(BaseModel):
     browser: bool = True
     same_origin_only: bool = True
     screenshot: bool = True
+    capture_console: bool = True
+    user_agent: str | None = None
+    plugins: list[str] = Field(default_factory=list)
 
 
 class ModuleResult(BaseModel):
@@ -41,7 +44,9 @@ class ScanReport(BaseModel):
     routes: list[str] = Field(default_factory=list)
     observed_endpoints: list[str] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
+    framework_matches: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
     fatal_errors: list[str] = Field(default_factory=list)
 
     @property
