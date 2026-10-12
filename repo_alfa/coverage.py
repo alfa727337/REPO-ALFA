@@ -36,6 +36,7 @@ def build_coverage(report: dict, root: Path) -> dict:
         "console": status("browser-capture", root / "console" / "events.json"),
         "storage": status("browser-capture", root / "storage" / "browser.json"),
         "ui_inventory": status("browser-capture", root / "ui" / "interactive-elements.json"),
+        "ui_states": status(None, root / "ui" / "states.json"),
         "public_discovery": status("public-discovery", root / "discovery" / "discovery.json"),
         "crawler": status("crawler"),
         "assets": status("asset-download", root / "assets" / "manifest.json"),
