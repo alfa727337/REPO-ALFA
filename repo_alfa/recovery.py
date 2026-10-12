@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -34,7 +34,7 @@ class RecoveryEngine:
                         RecoveryEvent(operation=operation, attempt=attempt, error="", recovered=True)
                     )
                 return result
-            except Exception as exc:  # recovery boundary: callers still receive final failure
+            except Exception as exc:
                 last_error = exc
                 self.events.append(
                     RecoveryEvent(operation=operation, attempt=attempt, error=repr(exc))
@@ -51,5 +51,5 @@ class RecoveryEngine:
         return {
             "attempts": len(self.events),
             "recovered": sum(1 for event in self.events if event.recovered),
-            "failures": [event.__dict__ for event in self.events if event.error],
+            "failures": [asdict(event) for event in self.events if event.error],
         }
