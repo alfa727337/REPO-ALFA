@@ -6,9 +6,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .analyzers import discover_endpoints, fingerprint
+from .api_classification import summarize_network
 from .assets import AssetDownloader
 from .browser_capture import BrowserCapture
 from .checkpoints import Checkpoint, CheckpointStore
+from .coverage import build_coverage, write_coverage
 from .crawler import Crawler
 from .frameworks import analyze_frameworks
 from .graphql_capture import detect_graphql, write_report as write_graphql_report
@@ -17,6 +19,8 @@ from .har import build_har
 from .html_report import render_html_report
 from .javascript_analysis import aggregate as aggregate_js, analyze_directory
 from .models import ModuleResult, ScanConfig, ScanReport
+from .plugins import PluginContext, run_plugins
+from .reconstruction import ReconstructionEngine
 from .recovery import RecoveryEngine
 from .sqlite_index import build_index
 from .static_capture import StaticCapture
@@ -81,10 +85,18 @@ class RepoAlfaEngine:
 
         browser_result = None
         if self.config.browser:
-            browser = BrowserCapture(timeout_ms=int(self.config.timeout_seconds * 1000))
+            browser = BrowserCapture(
+                timeout_ms=int(self.config.timeout_seconds * 1000),
+                user_agent=self.config.user_agent,
+            )
             browser_result = await self._module(
                 "browser-capture",
-                lambda: browser.capture(target, self.output, screenshot=self.config.screenshot),
+                lambda: browser.capture(
+                    target,
+                    self.output,
+                    screenshot=self.config.screenshot,
+                    capture_console=self.config.capture_console,
+                ),
             )
 
         crawl_result = None
@@ -134,6 +146,7 @@ class RepoAlfaEngine:
         self.report.routes = sorted(routes)
         self.report.observed_endpoints = endpoints
         self.report.technologies = technologies
+        self.report.framework_matches = framework_matches
 
         reports_dir = self.output / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +168,14 @@ class RepoAlfaEngine:
             gql_path = write_graphql_report(
                 detect_graphql(network_events), reports_dir / "graphql.json"
             )
-            self.report.artifacts.extend([str(har_path), str(gql_path)])
+            network_summary_path = reports_dir / "network-summary.json"
+            network_summary_path.write_text(
+                json.dumps(summarize_network(network_events), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.report.artifacts.extend(
+                [str(har_path), str(gql_path), str(network_summary_path)]
+            )
 
         if rank >= 2:
             js_findings = analyze_directory(self.output / "assets", target)
@@ -171,20 +191,55 @@ class RepoAlfaEngine:
             )
             self.report.artifacts.append(str(js_path))
 
+        if self.config.mode in {"reconstruction", "exhaustive"}:
+            reconstruction = ReconstructionEngine()
+            reconstruction_result = await self._module(
+                "reconstruction",
+                lambda: _sync_to_async(
+                    reconstruction.reconstruct,
+                    self.output,
+                    self.output / "reconstructed",
+                    target,
+                ),
+            )
+            if reconstruction_result.status == "complete":
+                self.report.artifacts.append(str(self.output / "reconstructed" / "index.html"))
+
+        if self.config.plugins:
+            plugin_context = PluginContext(
+                target=target,
+                output=self.output,
+                mode=self.config.mode,
+                report=self.report.model_dump(mode="json"),
+            )
+            plugin_results = await run_plugins(self.config.plugins, plugin_context)
+            plugin_path = reports_dir / "plugins.json"
+            plugin_path.write_text(
+                json.dumps(plugin_results, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.report.artifacts.append(str(plugin_path))
+
         self.report.finished_at = datetime.now(timezone.utc)
         report_path = self.output / "full-report.json"
         report_path.write_text(self.report.model_dump_json(indent=2), encoding="utf-8")
         self.report.artifacts.append(str(report_path))
 
         report_dict = json.loads(report_path.read_text(encoding="utf-8"))
+        coverage_path = write_coverage(report_dict, self.output, reports_dir / "coverage.json")
+        self.report.coverage = build_coverage(report_dict, self.output)
         sqlite_path = build_index(report_dict, self.output, reports_dir / "forensic.sqlite3")
         html_path = render_html_report(report_dict, reports_dir / "report.html")
-        self.report.artifacts.extend([str(sqlite_path), str(html_path)])
+        self.report.artifacts.extend([str(coverage_path), str(sqlite_path), str(html_path)])
 
-        # Rewrite once so generated report artifacts are themselves recorded.
+        # Rewrite once so generated report artifacts and coverage are themselves recorded.
         report_path.write_text(self.report.model_dump_json(indent=2), encoding="utf-8")
         return self.report
 
     @classmethod
     def load_report(cls, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def _sync_to_async(fn, *args):
+    """Call a fast filesystem-only function from an async pipeline."""
+    return fn(*args)
