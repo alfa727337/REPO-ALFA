@@ -13,6 +13,8 @@ from .crawler import Crawler
 from .graphing import build_endpoint_graph, build_route_graph, export_graph
 from .models import ModuleResult, ScanConfig, ScanReport
 from .recovery import RecoveryEngine
+from .security_audit import audit_cookies, audit_headers
+from .sourcemaps import SourceMapAnalyzer
 from .static_capture import StaticCapture
 
 MODE_RANK = {
@@ -93,6 +95,7 @@ class RepoAlfaEngine:
         routes: set[str] = set()
         texts: list[str] = []
         asset_urls: list[str] = []
+        script_urls: list[str] = []
         if static_result.status == "complete":
             routes.update(static_result.data.get("links", []))
             asset_urls.extend(static_result.data.get("assets", []))
@@ -104,14 +107,22 @@ class RepoAlfaEngine:
             routes.update(crawl_result.data.get("discovered", []))
 
         network_urls: list[str] = []
+        cookies: list[dict] = []
         if browser_result and browser_result.status == "complete":
-            asset_urls.extend(browser_result.data.get("scripts", []))
+            script_urls = list(browser_result.data.get("scripts", []))
+            asset_urls.extend(script_urls)
             asset_urls.extend(browser_result.data.get("stylesheets", []))
             network_urls = [
                 item["url"]
                 for item in browser_result.data.get("network", [])
                 if item.get("url")
             ]
+            storage_path = self.output / "storage" / "browser.json"
+            if storage_path.exists():
+                try:
+                    cookies = json.loads(storage_path.read_text(encoding="utf-8")).get("cookies", [])
+                except (OSError, json.JSONDecodeError):
+                    cookies = []
             dom = self.output / "dom" / "rendered.html"
             if dom.exists():
                 texts.append(dom.read_text(encoding="utf-8", errors="ignore"))
@@ -123,8 +134,33 @@ class RepoAlfaEngine:
                 lambda: downloader.download_many(asset_urls, self.output / "assets"),
             )
 
+        if rank >= 3 and script_urls:
+            sm = SourceMapAnalyzer(timeout=self.config.timeout_seconds)
+
+            async def inspect_maps() -> dict:
+                results = []
+                for script_url in sorted(set(script_urls)):
+                    results.append(
+                        await sm.inspect(script_url, self.output / "sourcemaps")
+                    )
+                return {"results": results}
+
+            await self._module("source-map-analysis", inspect_maps)
+
         technologies = fingerprint("\n".join(texts), asset_urls + network_urls)
         endpoints = discover_endpoints(texts, network_urls)
+
+        security_report = {
+            "headers": audit_headers(static_result.data.get("headers", {}))
+            if static_result.status == "complete"
+            else {},
+            "cookies": audit_cookies(cookies),
+        }
+        security_path = self.output / "reports" / "security-posture.json"
+        security_path.parent.mkdir(parents=True, exist_ok=True)
+        security_path.write_text(
+            json.dumps(security_report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
         self.report.routes = sorted(routes)
         self.report.observed_endpoints = endpoints
@@ -138,7 +174,9 @@ class RepoAlfaEngine:
             build_endpoint_graph(target, endpoints),
             self.output / "reports" / "endpoint-graph.json",
         )
-        self.report.artifacts.extend([str(route_graph), str(endpoint_graph)])
+        self.report.artifacts.extend(
+            [str(route_graph), str(endpoint_graph), str(security_path)]
+        )
 
         self.report.finished_at = datetime.now(timezone.utc)
         report_path = self.output / "full-report.json"
