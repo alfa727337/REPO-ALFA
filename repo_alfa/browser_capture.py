@@ -2,18 +2,40 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import async_playwright
 
 SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "proxy-authorization"}
+JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*\b")
 
 
 def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     return {
         key: ("<redacted>" if key.lower() in SENSITIVE_HEADERS else value)
         for key, value in headers.items()
+    }
+
+
+def _redact_text(text: str) -> str:
+    text = BEARER_RE.sub("Bearer <redacted>", text)
+    return JWT_RE.sub("<redacted-jwt>", text)
+
+
+def _payload_metadata(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, bytes):
+        raw = payload
+        kind = "binary"
+    else:
+        raw = str(payload).encode("utf-8", errors="replace")
+        kind = "text"
+    return {
+        "kind": kind,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
     }
 
 
@@ -46,9 +68,7 @@ class BrowserCapture:
         state_root = output / "ui" / "states"
         state_root.mkdir(parents=True, exist_ok=True)
         results: list[dict[str, Any]] = []
-        candidates = await page.locator(
-            '[role="tab"], button[aria-expanded], summary'
-        ).all()
+        candidates = await page.locator('[role="tab"], button[aria-expanded], summary').all()
 
         for index, locator in enumerate(candidates[:max_states]):
             try:
@@ -62,7 +82,6 @@ class BrowserCapture:
                 label = text or aria_label or f"{tag}-{index}"
                 state_id = _safe_state_id(role or tag or "state", index, label)
 
-                # Only known low-risk interactive surfaces are clicked.
                 await locator.click(timeout=min(self.timeout_ms, 5000))
                 try:
                     await page.wait_for_timeout(250)
@@ -96,7 +115,6 @@ class BrowserCapture:
                     }
                 )
 
-                # Restore expandable disclosure state when possible so later states are independent.
                 if expanded_before == "false" and expanded_after == "true":
                     try:
                         await locator.click(timeout=min(self.timeout_ms, 3000))
@@ -131,6 +149,7 @@ class BrowserCapture:
         websockets: list[dict[str, Any]] = []
         console_events: list[dict[str, Any]] = []
         page_errors: list[str] = []
+        workers: list[dict[str, Any]] = []
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -182,6 +201,7 @@ class BrowserCapture:
 
             page.on("request", on_request)
             page.on("response", on_response)
+            page.on("worker", lambda worker: workers.append({"url": worker.url}))
 
             def on_websocket(ws) -> None:
                 record: dict[str, Any] = {"url": ws.url, "frames": []}
@@ -189,13 +209,13 @@ class BrowserCapture:
                 ws.on(
                     "framesent",
                     lambda payload: record["frames"].append(
-                        {"direction": "sent", "payload_preview": str(payload)[:4096]}
+                        {"direction": "sent", **_payload_metadata(payload)}
                     ),
                 )
                 ws.on(
                     "framereceived",
                     lambda payload: record["frames"].append(
-                        {"direction": "received", "payload_preview": str(payload)[:4096]}
+                        {"direction": "received", **_payload_metadata(payload)}
                     ),
                 )
 
@@ -204,10 +224,14 @@ class BrowserCapture:
                 page.on(
                     "console",
                     lambda msg: console_events.append(
-                        {"type": msg.type, "text": msg.text[:8192], "location": msg.location}
+                        {
+                            "type": msg.type,
+                            "text": _redact_text(msg.text[:8192]),
+                            "location": msg.location,
+                        }
                     ),
                 )
-                page.on("pageerror", lambda exc: page_errors.append(str(exc)[:8192]))
+                page.on("pageerror", lambda exc: page_errors.append(_redact_text(str(exc)[:8192])))
 
             response = await page.goto(url, wait_until="domcontentloaded")
             try:
@@ -233,6 +257,15 @@ class BrowserCapture:
                   const regs = navigator.serviceWorker
                     ? await navigator.serviceWorker.getRegistrations()
                     : [];
+                  const storageMeta = (storage) => Array.from({length: storage.length}, (_, i) => {
+                    const key = storage.key(i);
+                    const value = key === null ? '' : (storage.getItem(key) || '');
+                    return {
+                      key,
+                      length: value.length,
+                      sensitiveName: /token|auth|session|secret|jwt|password|credential|key/i.test(key || '')
+                    };
+                  });
                   const elements = Array.from(document.querySelectorAll(
                     'a,button,input,select,textarea,[role],[tabindex],details,summary'
                   )).slice(0, 5000).map((el, index) => ({
@@ -249,9 +282,25 @@ class BrowserCapture:
                     ariaExpanded: el.getAttribute('aria-expanded'),
                     ariaControls: el.getAttribute('aria-controls')
                   }));
+                  const shadowRoots = [];
+                  const visit = (root) => {
+                    for (const el of root.querySelectorAll('*')) {
+                      if (el.shadowRoot && shadowRoots.length < 500) {
+                        shadowRoots.push({
+                          hostTag: el.tagName.toLowerCase(),
+                          hostId: el.id || null,
+                          hostClass: typeof el.className === 'string' ? el.className.slice(0, 500) : null,
+                          mode: el.shadowRoot.mode,
+                          html: el.shadowRoot.innerHTML.slice(0, 200000)
+                        });
+                        visit(el.shadowRoot);
+                      }
+                    }
+                  };
+                  visit(document);
                   return {
-                    localStorage: Object.fromEntries(Object.entries(localStorage)),
-                    sessionStorage: Object.fromEntries(Object.entries(sessionStorage)),
+                    localStorage: storageMeta(localStorage),
+                    sessionStorage: storageMeta(sessionStorage),
                     location: location.href,
                     title: document.title,
                     scripts: Array.from(document.scripts).map(s => s.src).filter(Boolean),
@@ -267,6 +316,7 @@ class BrowserCapture:
                       decodedBodySize: e.decodedBodySize || 0
                     })),
                     interactiveElements: elements,
+                    shadowRoots,
                     meta: Array.from(document.querySelectorAll('meta')).map(m => ({
                       name: m.name || null,
                       property: m.getAttribute('property'),
@@ -282,7 +332,6 @@ class BrowserCapture:
                 }"""
             )
 
-            # Keep browser cookie metadata but never persist cookie values.
             cookies = await context.cookies()
             browser_state["cookies"] = [
                 {
@@ -296,6 +345,12 @@ class BrowserCapture:
                 }
                 for item in cookies
             ]
+            frames = [
+                {"url": frame.url, "name": frame.name, "is_main": frame == page.main_frame}
+                for frame in page.frames
+            ]
+            browser_state["frames"] = frames
+            browser_state["workers"] = workers
 
             ui_states: list[dict[str, Any]] = []
             if explore_ui_states:
@@ -323,6 +378,16 @@ class BrowserCapture:
                 json.dumps(browser_state.get("interactiveElements", []), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            (output / "dom" / "shadow-roots.json").write_text(
+                json.dumps(browser_state.get("shadowRoots", []), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (output / "dom" / "frames.json").write_text(
+                json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (output / "dom" / "workers.json").write_text(
+                json.dumps(workers, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             (output / "console").mkdir(exist_ok=True)
             (output / "console" / "events.json").write_text(
                 json.dumps(
@@ -344,6 +409,9 @@ class BrowserCapture:
             "indexeddb": browser_state.get("indexedDB", []),
             "service_workers": browser_state.get("serviceWorkers", []),
             "interactive_elements": len(browser_state.get("interactiveElements", [])),
+            "shadow_roots": len(browser_state.get("shadowRoots", [])),
+            "frames": frames,
+            "workers": workers,
             "ui_states": len(ui_states),
             "network_events": len(network),
             "console_events": len(console_events),
