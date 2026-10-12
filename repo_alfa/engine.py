@@ -10,11 +10,15 @@ from .assets import AssetDownloader
 from .browser_capture import BrowserCapture
 from .checkpoints import Checkpoint, CheckpointStore
 from .crawler import Crawler
+from .frameworks import analyze_frameworks
+from .graphql_capture import detect_graphql, write_report as write_graphql_report
 from .graphing import build_endpoint_graph, build_route_graph, export_graph
+from .har import build_har
+from .html_report import render_html_report
+from .javascript_analysis import aggregate as aggregate_js, analyze_directory
 from .models import ModuleResult, ScanConfig, ScanReport
 from .recovery import RecoveryEngine
-from .security_audit import audit_cookies, audit_headers
-from .sourcemaps import SourceMapAnalyzer
+from .sqlite_index import build_index
 from .static_capture import StaticCapture
 
 MODE_RANK = {
@@ -95,7 +99,6 @@ class RepoAlfaEngine:
         routes: set[str] = set()
         texts: list[str] = []
         asset_urls: list[str] = []
-        script_urls: list[str] = []
         if static_result.status == "complete":
             routes.update(static_result.data.get("links", []))
             asset_urls.extend(static_result.data.get("assets", []))
@@ -106,23 +109,13 @@ class RepoAlfaEngine:
         if crawl_result and crawl_result.status == "complete":
             routes.update(crawl_result.data.get("discovered", []))
 
+        network_events: list[dict] = []
         network_urls: list[str] = []
-        cookies: list[dict] = []
         if browser_result and browser_result.status == "complete":
-            script_urls = list(browser_result.data.get("scripts", []))
-            asset_urls.extend(script_urls)
+            asset_urls.extend(browser_result.data.get("scripts", []))
             asset_urls.extend(browser_result.data.get("stylesheets", []))
-            network_urls = [
-                item["url"]
-                for item in browser_result.data.get("network", [])
-                if item.get("url")
-            ]
-            storage_path = self.output / "storage" / "browser.json"
-            if storage_path.exists():
-                try:
-                    cookies = json.loads(storage_path.read_text(encoding="utf-8")).get("cookies", [])
-                except (OSError, json.JSONDecodeError):
-                    cookies = []
+            network_events = browser_result.data.get("network", [])
+            network_urls = [item["url"] for item in network_events if item.get("url")]
             dom = self.output / "dom" / "rendered.html"
             if dom.exists():
                 texts.append(dom.read_text(encoding="utf-8", errors="ignore"))
@@ -134,54 +127,62 @@ class RepoAlfaEngine:
                 lambda: downloader.download_many(asset_urls, self.output / "assets"),
             )
 
-        if rank >= 3 and script_urls:
-            sm = SourceMapAnalyzer(timeout=self.config.timeout_seconds)
-
-            async def inspect_maps() -> dict:
-                results = []
-                for script_url in sorted(set(script_urls)):
-                    results.append(
-                        await sm.inspect(script_url, self.output / "sourcemaps")
-                    )
-                return {"results": results}
-
-            await self._module("source-map-analysis", inspect_maps)
-
         technologies = fingerprint("\n".join(texts), asset_urls + network_urls)
         endpoints = discover_endpoints(texts, network_urls)
-
-        security_report = {
-            "headers": audit_headers(static_result.data.get("headers", {}))
-            if static_result.status == "complete"
-            else {},
-            "cookies": audit_cookies(cookies),
-        }
-        security_path = self.output / "reports" / "security-posture.json"
-        security_path.parent.mkdir(parents=True, exist_ok=True)
-        security_path.write_text(
-            json.dumps(security_report, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        framework_matches = analyze_frameworks("\n".join(texts), asset_urls + network_urls)
 
         self.report.routes = sorted(routes)
         self.report.observed_endpoints = endpoints
         self.report.technologies = technologies
 
+        reports_dir = self.output / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
         route_graph = export_graph(
-            build_route_graph(target, self.report.routes),
-            self.output / "reports" / "route-graph.json",
+            build_route_graph(target, self.report.routes), reports_dir / "route-graph.json"
         )
         endpoint_graph = export_graph(
-            build_endpoint_graph(target, endpoints),
-            self.output / "reports" / "endpoint-graph.json",
+            build_endpoint_graph(target, endpoints), reports_dir / "endpoint-graph.json"
         )
-        self.report.artifacts.extend(
-            [str(route_graph), str(endpoint_graph), str(security_path)]
+        framework_path = reports_dir / "frameworks.json"
+        framework_path.write_text(
+            json.dumps(framework_matches, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self.report.artifacts.extend([str(route_graph), str(endpoint_graph), str(framework_path)])
+
+        if network_events:
+            har_path = build_har(network_events, target, reports_dir / "capture.har")
+            gql_path = write_graphql_report(
+                detect_graphql(network_events), reports_dir / "graphql.json"
+            )
+            self.report.artifacts.extend([str(har_path), str(gql_path)])
+
+        if rank >= 2:
+            js_findings = analyze_directory(self.output / "assets", target)
+            js_summary = aggregate_js(js_findings)
+            js_path = reports_dir / "javascript.json"
+            js_path.write_text(
+                json.dumps(
+                    {"summary": js_summary, "files": js_findings},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            self.report.artifacts.append(str(js_path))
 
         self.report.finished_at = datetime.now(timezone.utc)
         report_path = self.output / "full-report.json"
         report_path.write_text(self.report.model_dump_json(indent=2), encoding="utf-8")
         self.report.artifacts.append(str(report_path))
+
+        report_dict = json.loads(report_path.read_text(encoding="utf-8"))
+        sqlite_path = build_index(report_dict, self.output, reports_dir / "forensic.sqlite3")
+        html_path = render_html_report(report_dict, reports_dir / "report.html")
+        self.report.artifacts.extend([str(sqlite_path), str(html_path)])
+
+        # Rewrite once so generated report artifacts are themselves recorded.
+        report_path.write_text(self.report.model_dump_json(indent=2), encoding="utf-8")
         return self.report
 
     @classmethod
