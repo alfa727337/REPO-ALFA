@@ -114,6 +114,7 @@ class RepoAlfaEngine:
             browser = BrowserCapture(
                 timeout_ms=int(self.config.timeout_seconds * 1000),
                 user_agent=self.config.user_agent,
+                storage_state=self.config.storage_state,
             )
             browser_result = await self._module(
                 "browser-capture",
@@ -122,6 +123,8 @@ class RepoAlfaEngine:
                     self.output,
                     screenshot=self.config.screenshot,
                     capture_console=self.config.capture_console,
+                    explore_ui_states=self.config.explore_ui_states,
+                    max_ui_states=self.config.max_ui_states,
                 ),
             )
 
