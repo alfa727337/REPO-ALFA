@@ -24,6 +24,9 @@ def _execute(
     depth: int,
     browser: bool = True,
     plugins: list[str] | None = None,
+    storage_state: Path | None = None,
+    explore_ui_states: bool = True,
+    max_ui_states: int = 30,
 ):
     config = ScanConfig(
         target=target,
@@ -32,6 +35,9 @@ def _execute(
         max_depth=depth,
         browser=browser,
         plugins=plugins or [],
+        storage_state=storage_state,
+        explore_ui_states=explore_ui_states,
+        max_ui_states=max_ui_states,
     )
     return asyncio.run(RepoAlfaEngine(config).run())
 
@@ -73,8 +79,21 @@ def _run(
     depth: int,
     browser: bool = True,
     plugins: list[str] | None = None,
+    storage_state: Path | None = None,
+    explore_ui_states: bool = True,
+    max_ui_states: int = 30,
 ) -> None:
-    report = _execute(target, mode, output, depth, browser, plugins)
+    report = _execute(
+        target,
+        mode,
+        output,
+        depth,
+        browser,
+        plugins,
+        storage_state,
+        explore_ui_states,
+        max_ui_states,
+    )
     _print_summary(report)
 
 
@@ -93,8 +112,25 @@ def scan(target: str, output: Path = Path("output"), depth: int = 1) -> None:
 
 
 @app.command()
-def capture(target: str, output: Path = Path("output"), depth: int = 2) -> None:
-    _run(target, "standard", output, depth)
+def capture(
+    target: str,
+    output: Path = Path("output"),
+    depth: int = 2,
+    storage_state: Path | None = typer.Option(
+        None, "--storage-state", help="Authorized Playwright storage-state JSON"
+    ),
+    explore_ui: bool = typer.Option(True, "--explore-ui/--no-explore-ui"),
+    max_ui_states: int = typer.Option(30, "--max-ui-states", min=0, max=250),
+) -> None:
+    _run(
+        target,
+        "standard",
+        output,
+        depth,
+        storage_state=storage_state,
+        explore_ui_states=explore_ui,
+        max_ui_states=max_ui_states,
+    )
 
 
 @app.command("map")
@@ -139,8 +175,23 @@ def technologies(target: str, output: Path = Path("output"), depth: int = 1) -> 
 
 
 @app.command()
-def deep(target: str, output: Path = Path("output"), depth: int = 5) -> None:
-    _run(target, "deep", output, depth)
+def deep(
+    target: str,
+    output: Path = Path("output"),
+    depth: int = 5,
+    storage_state: Path | None = typer.Option(None, "--storage-state"),
+    explore_ui: bool = typer.Option(True, "--explore-ui/--no-explore-ui"),
+    max_ui_states: int = typer.Option(30, "--max-ui-states", min=0, max=250),
+) -> None:
+    _run(
+        target,
+        "deep",
+        output,
+        depth,
+        storage_state=storage_state,
+        explore_ui_states=explore_ui,
+        max_ui_states=max_ui_states,
+    )
 
 
 @app.command()
@@ -151,8 +202,20 @@ def forensic(
     plugin: list[str] | None = typer.Option(
         None, "--plugin", help="module:attribute plugin"
     ),
+    storage_state: Path | None = typer.Option(None, "--storage-state"),
+    explore_ui: bool = typer.Option(True, "--explore-ui/--no-explore-ui"),
+    max_ui_states: int = typer.Option(30, "--max-ui-states", min=0, max=250),
 ) -> None:
-    _run(target, "forensic", output, depth, plugins=plugin)
+    _run(
+        target,
+        "forensic",
+        output,
+        depth,
+        plugins=plugin,
+        storage_state=storage_state,
+        explore_ui_states=explore_ui,
+        max_ui_states=max_ui_states,
+    )
 
 
 @app.command()
@@ -163,13 +226,40 @@ def exhaustive(
     plugin: list[str] | None = typer.Option(
         None, "--plugin", help="module:attribute plugin"
     ),
+    storage_state: Path | None = typer.Option(None, "--storage-state"),
+    explore_ui: bool = typer.Option(True, "--explore-ui/--no-explore-ui"),
+    max_ui_states: int = typer.Option(30, "--max-ui-states", min=0, max=250),
 ) -> None:
-    _run(target, "exhaustive", output, depth, plugins=plugin)
+    _run(
+        target,
+        "exhaustive",
+        output,
+        depth,
+        plugins=plugin,
+        storage_state=storage_state,
+        explore_ui_states=explore_ui,
+        max_ui_states=max_ui_states,
+    )
 
 
 @app.command()
-def reconstruct(target: str, output: Path = Path("output"), depth: int = 8) -> None:
-    _run(target, "reconstruction", output, depth)
+def reconstruct(
+    target: str,
+    output: Path = Path("output"),
+    depth: int = 8,
+    storage_state: Path | None = typer.Option(None, "--storage-state"),
+    explore_ui: bool = typer.Option(True, "--explore-ui/--no-explore-ui"),
+    max_ui_states: int = typer.Option(30, "--max-ui-states", min=0, max=250),
+) -> None:
+    _run(
+        target,
+        "reconstruction",
+        output,
+        depth,
+        storage_state=storage_state,
+        explore_ui_states=explore_ui,
+        max_ui_states=max_ui_states,
+    )
 
 
 @app.command()
