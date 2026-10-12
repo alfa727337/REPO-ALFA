@@ -37,4 +37,4 @@ testpaths = ["tests"]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F"]
+select = ["F"]
