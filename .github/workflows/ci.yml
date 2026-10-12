@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  python-core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,3 +16,24 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check repo_alfa tests
       - run: pytest -q
+
+  javascript-ast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm install --no-audit --no-fund
+      - name: Babel AST smoke test
+        shell: bash
+        run: |
+          cat > /tmp/repo-alfa-sample.tsx <<'EOF'
+          import React from 'react';
+          export const Demo = () => fetch('/api/demo');
+          const Lazy = import('./lazy.js');
+          const socket = new WebSocket('wss://example.test/socket');
+          EOF
+          node repo_alfa/node/js_ast.mjs /tmp/repo-alfa-sample.tsx > /tmp/ast.json
+          node -e "const x=require('/tmp/ast.json'); if(!x.parsed || !x.imports.includes('react') || !x.fetchCalls.includes('/api/demo')) process.exit(1)"
