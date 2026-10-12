@@ -189,6 +189,7 @@ def build_index(report: dict, root: Path, db_path: Path) -> Path:
             )
 
         db_resolved = db_path.resolve()
+        db_sidecar_prefix = db_path.name + "-"
         manifest_resolved = (root / "evidence-manifest.json").resolve()
         for path in sorted(root.rglob("*")):
             if not path.is_file():
@@ -196,6 +197,10 @@ def build_index(report: dict, root: Path, db_path: Path) -> Path:
             try:
                 resolved = path.resolve()
                 if resolved in {db_resolved, manifest_resolved}:
+                    continue
+                if path.parent.resolve() == db_path.parent.resolve() and path.name.startswith(
+                    db_sidecar_prefix
+                ):
                     continue
                 size = path.stat().st_size
             except OSError:
