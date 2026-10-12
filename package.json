@@ -1,0 +1,14 @@
+{
+  "name": "repo-alfa-js-analyzer",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Optional modern JavaScript/TypeScript AST analyzer for REPO ALFA",
+  "scripts": {
+    "ast": "node repo_alfa/node/js_ast.mjs"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.28.5",
+    "@babel/traverse": "^7.28.5"
+  }
+}
