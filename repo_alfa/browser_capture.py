@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,105 @@ def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _safe_state_id(kind: str, index: int, label: str) -> str:
+    digest = hashlib.sha1(label.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"{kind}-{index:03d}-{digest}"
+
+
 class BrowserCapture:
-    def __init__(self, timeout_ms: int = 30000, user_agent: str | None = None) -> None:
+    def __init__(
+        self,
+        timeout_ms: int = 30000,
+        user_agent: str | None = None,
+        storage_state: Path | None = None,
+    ) -> None:
         self.timeout_ms = timeout_ms
         self.user_agent = user_agent
+        self.storage_state = storage_state
+
+    async def _explore_ui_states(
+        self,
+        page,
+        output: Path,
+        max_states: int,
+    ) -> list[dict[str, Any]]:
+        """Explore low-risk disclosure states without submitting forms or generic buttons."""
+        if max_states <= 0:
+            return []
+
+        state_root = output / "ui" / "states"
+        state_root.mkdir(parents=True, exist_ok=True)
+        results: list[dict[str, Any]] = []
+        candidates = await page.locator(
+            '[role="tab"], button[aria-expanded], summary'
+        ).all()
+
+        for index, locator in enumerate(candidates[:max_states]):
+            try:
+                if not await locator.is_visible() or not await locator.is_enabled():
+                    continue
+                tag = await locator.evaluate("el => el.tagName.toLowerCase()")
+                role = await locator.get_attribute("role")
+                expanded_before = await locator.get_attribute("aria-expanded")
+                text = ((await locator.inner_text()) or "").strip()[:300]
+                aria_label = (await locator.get_attribute("aria-label") or "").strip()[:300]
+                label = text or aria_label or f"{tag}-{index}"
+                state_id = _safe_state_id(role or tag or "state", index, label)
+
+                # Only known low-risk interactive surfaces are clicked.
+                await locator.click(timeout=min(self.timeout_ms, 5000))
+                try:
+                    await page.wait_for_timeout(250)
+                except Exception:
+                    pass
+
+                state_dir = state_root / state_id
+                state_dir.mkdir(parents=True, exist_ok=True)
+                dom_path = state_dir / "dom.html"
+                dom_path.write_text(await page.content(), encoding="utf-8")
+                screenshot_path = state_dir / "screenshot.png"
+                try:
+                    await page.screenshot(path=str(screenshot_path), full_page=True)
+                    screenshot_written = True
+                except Exception:
+                    screenshot_written = False
+
+                expanded_after = await locator.get_attribute("aria-expanded")
+                results.append(
+                    {
+                        "id": state_id,
+                        "selector_class": "safe-disclosure",
+                        "tag": tag,
+                        "role": role,
+                        "label": label,
+                        "aria_expanded_before": expanded_before,
+                        "aria_expanded_after": expanded_after,
+                        "url": page.url,
+                        "dom": str(dom_path),
+                        "screenshot": str(screenshot_path) if screenshot_written else None,
+                    }
+                )
+
+                # Restore expandable disclosure state when possible so later states are independent.
+                if expanded_before == "false" and expanded_after == "true":
+                    try:
+                        await locator.click(timeout=min(self.timeout_ms, 3000))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                results.append(
+                    {
+                        "id": f"candidate-{index:03d}",
+                        "selector_class": "safe-disclosure",
+                        "status": "failed",
+                        "error": repr(exc),
+                    }
+                )
+
+        (output / "ui" / "states.json").write_text(
+            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return results
 
     async def capture(
         self,
@@ -27,6 +123,8 @@ class BrowserCapture:
         output: Path,
         screenshot: bool = True,
         capture_console: bool = True,
+        explore_ui_states: bool = True,
+        max_ui_states: int = 30,
     ) -> dict[str, Any]:
         output.mkdir(parents=True, exist_ok=True)
         network: list[dict[str, Any]] = []
@@ -42,6 +140,11 @@ class BrowserCapture:
             }
             if self.user_agent:
                 context_kwargs["user_agent"] = self.user_agent
+            if self.storage_state:
+                if not self.storage_state.exists():
+                    raise FileNotFoundError(f"storage state not found: {self.storage_state}")
+                context_kwargs["storage_state"] = str(self.storage_state)
+
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
             page.set_default_timeout(self.timeout_ms)
@@ -178,6 +281,7 @@ class BrowserCapture:
                   };
                 }"""
             )
+
             # Keep browser cookie metadata but never persist cookie values.
             cookies = await context.cookies()
             browser_state["cookies"] = [
@@ -192,6 +296,10 @@ class BrowserCapture:
                 }
                 for item in cookies
             ]
+
+            ui_states: list[dict[str, Any]] = []
+            if explore_ui_states:
+                ui_states = await self._explore_ui_states(page, output, max_ui_states)
 
             (output / "network").mkdir(exist_ok=True)
             (output / "network" / "events.json").write_text(
@@ -236,9 +344,11 @@ class BrowserCapture:
             "indexeddb": browser_state.get("indexedDB", []),
             "service_workers": browser_state.get("serviceWorkers", []),
             "interactive_elements": len(browser_state.get("interactiveElements", [])),
+            "ui_states": len(ui_states),
             "network_events": len(network),
             "console_events": len(console_events),
             "page_errors": len(page_errors),
             "websockets": websockets,
             "network": network,
+            "authorized_storage_state": bool(self.storage_state),
         }
