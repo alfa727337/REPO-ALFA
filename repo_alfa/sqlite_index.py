@@ -68,6 +68,60 @@ def _artifact_kind(path: Path) -> str:
     return "other"
 
 
+def _write_evidence_manifest(conn: sqlite3.Connection, root: Path) -> Path:
+    rows = conn.execute(
+        "SELECT path,kind,size,sha256 FROM artifacts ORDER BY path"
+    ).fetchall()
+    artifacts = [
+        {"path": path, "kind": kind, "size": size, "sha256": sha256}
+        for path, kind, size, sha256 in rows
+    ]
+    canonical = json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    manifest = {
+        "algorithm": "sha256",
+        "artifact_count": len(artifacts),
+        "root_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "artifacts": artifacts,
+    }
+    path = root / "evidence-manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def verify_evidence_manifest(root: Path) -> dict:
+    path = root / "evidence-manifest.json"
+    if not path.exists():
+        return {"ok": False, "error": "evidence-manifest.json not found", "mismatches": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mismatches: list[dict] = []
+    for item in data.get("artifacts", []):
+        artifact = root / item["path"]
+        if not artifact.exists():
+            mismatches.append({"path": item["path"], "reason": "missing"})
+            continue
+        actual = _sha256(artifact)
+        if actual != item.get("sha256"):
+            mismatches.append(
+                {
+                    "path": item["path"],
+                    "reason": "sha256-mismatch",
+                    "expected": item.get("sha256"),
+                    "actual": actual,
+                }
+            )
+    artifacts = data.get("artifacts", [])
+    canonical = json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    root_digest_ok = hashlib.sha256(canonical.encode("utf-8")).hexdigest() == data.get("root_digest")
+    if not root_digest_ok:
+        mismatches.append({"path": "<manifest>", "reason": "root-digest-mismatch"})
+    return {
+        "ok": not mismatches,
+        "artifact_count": len(artifacts),
+        "root_digest_ok": root_digest_ok,
+        "mismatches": mismatches,
+    }
+
+
 def build_index(report: dict, root: Path, db_path: Path) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -135,11 +189,13 @@ def build_index(report: dict, root: Path, db_path: Path) -> Path:
             )
 
         db_resolved = db_path.resolve()
+        manifest_resolved = (root / "evidence-manifest.json").resolve()
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
             try:
-                if path.resolve() == db_resolved:
+                resolved = path.resolve()
+                if resolved in {db_resolved, manifest_resolved}:
                     continue
                 size = path.stat().st_size
             except OSError:
@@ -165,6 +221,12 @@ def build_index(report: dict, root: Path, db_path: Path) -> Path:
                 "INSERT OR REPLACE INTO metadata(key,value) VALUES (?, ?)",
                 (key, str(value)),
             )
+        conn.commit()
+        manifest_path = _write_evidence_manifest(conn, root)
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES ('evidence_manifest', ?)",
+            (str(manifest_path),),
+        )
         conn.commit()
     finally:
         conn.close()
