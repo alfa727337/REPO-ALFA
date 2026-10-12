@@ -1,0 +1,8 @@
+services:
+  repo-alfa:
+    build: .
+    working_dir: /app
+    volumes:
+      - ./output:/app/output
+    entrypoint: ["repo-alfa"]
+    command: ["--help"]
