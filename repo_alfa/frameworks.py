@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
+
+from .framework_details import extract_framework_details
 
 
 @dataclass(slots=True)
@@ -8,6 +10,7 @@ class FrameworkMatch:
     name: str
     confidence: float
     evidence: list[str]
+    details: dict
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -15,7 +18,7 @@ class FrameworkMatch:
 
 SIGNATURES: dict[str, tuple[str, ...]] = {
     "Next.js": ("__NEXT_DATA__", "/_next/static/", "next/router", "next/navigation"),
-    "React": ("react-dom", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "data-reactroot"),
+    "React": ("react-dom", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "data-reactroot", "#__next"),
     "Nuxt": ("__NUXT__", "/_nuxt/", "nuxt-link"),
     "Vue": ("__VUE__", "data-v-", "vue-router"),
     "Angular": ("ng-version", "zone.js", "@angular/core"),
@@ -30,12 +33,24 @@ SIGNATURES: dict[str, tuple[str, ...]] = {
 
 def analyze_frameworks(html: str, urls: list[str], js_text: str = "") -> list[dict]:
     haystack = "\n".join([html, js_text, *urls])
+    details = extract_framework_details(html)
     results: list[FrameworkMatch] = []
     for name, signatures in SIGNATURES.items():
         hits = [sig for sig in signatures if sig in haystack]
-        if not hits:
+        framework_details = details.get(name, {})
+        if not hits and not framework_details:
             continue
-        confidence = min(0.99, 0.45 + (len(hits) / len(signatures)) * 0.55)
-        results.append(FrameworkMatch(name=name, confidence=round(confidence, 2), evidence=hits))
+        confidence = min(
+            0.99,
+            0.45 + (len(hits) / len(signatures)) * 0.55 + (0.10 if framework_details else 0),
+        )
+        results.append(
+            FrameworkMatch(
+                name=name,
+                confidence=round(confidence, 2),
+                evidence=hits,
+                details=framework_details,
+            )
+        )
     results.sort(key=lambda item: item.confidence, reverse=True)
     return [item.to_dict() for item in results]
